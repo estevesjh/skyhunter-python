@@ -1,5 +1,5 @@
 from skyhunter import IoptronMount
+from config import port
 
-# Initialize the mount
-mount = IoptronMount(port='/dev/ttyUSB1')
+mount = IoptronMount(port)
 mount.get_time_information()

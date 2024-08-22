@@ -32,6 +32,9 @@ class IoptronMount:
         # Mount version
         self.mount = self.get_mount_version()
 
+        # Set the altitude limit to -89 deg (the range is -89 to 89)
+        self.set_alt_limit(-89)
+
     # Destructor that gets called when the object is destroyed
     def __del__(self):
         # Close the serial connection
@@ -55,26 +58,27 @@ class IoptronMount:
     
     def set_ra(self, ra):
         sign = '+' if ra >= 0 else '-'
-        ra_str = f"{sign}{int(ra * 360000):08d}#"  # Convert RA to 0.01 arc-seconds
+        ra_str = f"{int(abs(ra) * 360000):09d}#"  # Convert RA to 0.01 arc-seconds
         command = f":SRA{ra_str}"
         return self.scope.send(command)
 
     def set_dec(self, dec):
         sign = '+' if dec >= 0 else '-'
-        dec_str = f"{sign}{int(dec * 360000):08d}#"  # Convert Dec to 0.01 arc-seconds
+        dec_str = f"{int(dec * 360000):08d}#"  # Convert Dec to 0.01 arc-seconds
         command = f":Sd{dec_str}"
         return self.scope.send(command)
 
     def set_alt(self, alt):
         sign = '+' if alt >= 0 else '-'
-        alt_str = f"{sign}{int(alt * 360000):08d}#"  # Convert Alt to 0.01 arc-seconds
+        alt_str = f"{sign}{int(abs(alt) * 360000):08d}#"  # Convert Az to 0.01 arc-seconds
         command = f":Sa{alt_str}"
-        # self.print_received(command, '')
-        return self.scope.send(command)
+        self.scope.send(command)
+        response = self.scope.recv()
+        self.print_received(command, response)
+        return response == "1"
 
     def set_az(self, az):
-        sign = '+' if az >= 0 else '-'
-        az_str = f"{sign}{int(az * 360000):08d}#"  # Convert Az to 0.01 arc-seconds
+        az_str = f"{int(abs(az) * 360000):09d}#"  # Convert Az to 0.01 arc-seconds
         command = f":Sz{az_str}"
         # self.print_received(command, '')
         return self.scope.send(command)
@@ -83,6 +87,7 @@ class IoptronMount:
         """ slew to a specific altitude and azimuth. """
         print('Setting the altitude and azimuth...')
         self.set_alt(alt)
+        # print('Failed to set the altitude.')
         self.set_az(az)
 
         print('Slewing to the altitude and azimuth...')
@@ -184,7 +189,14 @@ class IoptronMount:
         self.scope.send(speed_command)
         if self.scope.recv() == '1':
             return True
-
+        
+    def set_alt_limit(self, alt_limit):
+        """Set the altitude limit of the mount. Returns True after command is sent."""
+        alt_limit_str = f"{int(alt_limit):02d}"
+        command = f":SAL{alt_limit_str}#"
+        self.scope.send(command)
+        return self.scope.recv() == '1'
+    
     def park(self):
         """Park the mount at the most recently defined parking position."""
         self.scope.send(":MP1#")
@@ -250,6 +262,23 @@ class IoptronMount:
         print(f"Mount version: {response}")
         return response
 
+    def set_park_position(self, alt=90, az=0):
+        """Set the parking position of the mount."""
+        alt_str = f"{int(alt * 360000):08d}"
+        az_str = f"{int(az * 360000):08d}"
+
+        # set azimuth
+        self.scope.send(f":SPA+{az_str}#")
+        response = self.scope.recv()
+        self.print_received(f":SPA+{az_str}#", response)
+
+        # set altitude 
+        self.scope.send(f":SPH+{alt_str}#")
+        response = self.scope.recv()
+        self.print_received(f":SPH+{alt_str}#", response)
+
+        return response == "1"
+    
     def set_time(self):
         """Set the current time on the moint to the current computer's time. Sets to UTC."""
         j2k_time = str(utils.get_utc_time_in_j2k()).zfill(13)
@@ -276,6 +305,9 @@ class IoptronMount:
         utc_offset_minutes = int(response_data[0:4])
         self.time.utc_offset = utc_offset_minutes / 60.0  # Convert minutes to hours
         self.time.dst = response_data[4:5] == '1'
+
+        if self.time.dst:
+            self.time.utc_offset += 1
         
         # Extract and convert the time value
         utc_millis = int(response_data[5:18])

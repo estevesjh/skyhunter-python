@@ -24,8 +24,7 @@ def parse_alt_az(response):
         alt (float): the altitude in degree
         az (float): the azimuth in degree
     """
-    # Check if the response has the correct format
-    if len(response) == 20:
+    if len(response) == 20 and response[-1] == '#':
         response = response[1:]
 
     if len(response) != 19 or response[-1] != '#':
@@ -34,7 +33,7 @@ def parse_alt_az(response):
     # Extract altitude and azimuth parts
     sign = response[0]
     altitude_str = response[1:9]
-    azimuth_str = response[9:18]
+    azimuth_str = response[9:-1]
 
     # Convert to integers
     altitude = int(altitude_str) * (1 if sign == '+' else -1)
@@ -43,6 +42,7 @@ def parse_alt_az(response):
     # Convert to degrees
     altitude_deg = altitude / 360000.0
     azimuth_deg = azimuth / 360000.0
+    azimuth_deg = np.where(azimuth_deg > 360, azimuth_deg - 360, azimuth_deg)
 
     return np.round(altitude_deg,5), np.round(azimuth_deg,5)
 
