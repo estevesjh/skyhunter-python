@@ -14,7 +14,7 @@
 """
 import numpy as np
 
-def parse_alt_az(response):
+def parse_alt_az(response, is_latlong=False):
     """Parse the altitude and azimuth from the iOptron response.
 
     Args:
@@ -24,16 +24,15 @@ def parse_alt_az(response):
         alt (float): the altitude in degree
         az (float): the azimuth in degree
     """
-    if len(response) == 20 and response[-1] == '#':
+    if len(response) == 20:
         response = response[1:]
-
-    if len(response) != 19 or response[-1] != '#':
-        raise ValueError("Invalid response format")
 
     # Extract altitude and azimuth parts
     sign = response[0]
     altitude_str = response[1:9]
-    azimuth_str = response[9:-1]
+    azimuth_str = response[9:18]
+    if is_latlong:
+        azimuth_str = response[9:17]
 
     # Convert to integers
     altitude = int(altitude_str) * (1 if sign == '+' else -1)
@@ -46,6 +45,9 @@ def parse_alt_az(response):
 
     return np.round(altitude_deg,5), np.round(azimuth_deg,5)
 
+def angular_difference(target_angle, current_angle):
+    diff = (target_angle - current_angle + 180) % 360 - 180
+    return diff
 # # Example usage:
 # response = "+01234567012345678#"
 # altitude, azimuth = parse_ioptron_response(response)

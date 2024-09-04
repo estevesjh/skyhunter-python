@@ -16,7 +16,7 @@ for i in range(nsteps):
     print(f"---- Slew to the {direction} for {steps} seconds: {i}")
     # setattr(mount, f"slew_{direction}", steps)
     # run the function mount.slew_{direction}(steps)
-    getattr(mount, f"slew_{direction}")(steps)
+    getattr(mount, f"slew_{direction}")(steps, is_freerun=False)
 
     # mount.slew_left(steps)
     mount.get_system_state(verbose=False)

@@ -6,6 +6,7 @@ Module for interfacing and communicating with stuff over serial.
 import logging
 import sys
 import time
+import numpy as np
 import serial
 import serial.tools.list_ports
 
@@ -47,6 +48,15 @@ class USBSerial:
             output += self.ser.read(1).decode('utf-8')
         logging.debug("Received <- %s", str(output))
         return output
+    
+    def recv_timestamp(self):
+        """Receive the output with a timestamp."""
+        output = ''
+        while self.ser.inWaiting() > 0:
+            output += self.ser.read(1).decode('utf-8')
+            timestamp = time.time()
+        logging.debug("Received <- %s", str(output))
+        return output, np.datetime64(int(timestamp * 1e9), 'ns')
 
     def close(self):
         """Close the connection."""

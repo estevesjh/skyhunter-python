@@ -1,5 +1,6 @@
 import time
 import sys
+import numpy as np
 from dataclasses import dataclass, field
 from astropy.time import Time, TimeDelta
 import astropy.units as u
@@ -20,6 +21,9 @@ class IoptronMount:
         else:
             print("Connection failed.")
             sys.exit(1)
+
+        self.OFFSET_ALT = 0
+        self.OFFSET_AZ = 0
 
         # Time information
         self.time = TimeInfo()
@@ -42,33 +46,29 @@ class IoptronMount:
             self.scope.close()
         except:
             print("CLEANUP: not needed or was unclean")
-    
-    def get_park_position(self):
-        """Get the current parking position of the mount. """
-        self.scope.send(':GPC#')
-        returned_data = self.scope.recv()
-        alt, az = utils.parse_alt_az("+"+returned_data)
-        self.altitude = alt
-        self.azimuth = az
-    
-    def print_park_position(self):
-        """Print the current parking position of the mount. """
-        self.get_park_position()
-        print(f'Altitude: {self.altitude} deg, Azimuth: {self.azimuth} deg')
-    
-    def set_ra(self, ra):
-        sign = '+' if ra >= 0 else '-'
-        ra_str = f"{int(abs(ra) * 360000):09d}#"  # Convert RA to 0.01 arc-seconds
-        command = f":SRA{ra_str}"
-        return self.scope.send(command)
 
-    def set_dec(self, dec):
-        sign = '+' if dec >= 0 else '-'
-        dec_str = f"{int(dec * 360000):08d}#"  # Convert Dec to 0.01 arc-seconds
-        command = f":Sd{dec_str}"
-        return self.scope.send(command)
+    def get_system_state(self, verbose=True):
+        """Get (a lot) of status from the mount. Get movement
+        and tracking information."""
+        self.scope.send(":GLS#")
+        response_data = self.scope.recv()
+        status_code = response_data[18:19]
+
+        # get latitude and longitude
+        pos = utils.parse_alt_az(response_data[:18], is_latlong=True)
+        self.latitude_deg = pos[1]-90
+        self.longitude_deg = pos[0]
+
+        # get sysetm status
+        self.system_status.update_status(status_code)
+        if verbose:
+            print(self.system_status)
+            print(f"Latitude: {self.latitude_deg:0.5f} deg, Longitude: {self.longitude_deg:0.5f} deg")
+
+        self.last_update = time.time()
 
     def set_alt(self, alt):
+        alt = self.offset_alt(alt)
         sign = '+' if alt >= 0 else '-'
         alt_str = f"{sign}{int(abs(alt) * 360000):08d}#"  # Convert Az to 0.01 arc-seconds
         command = f":Sa{alt_str}"
@@ -78,17 +78,20 @@ class IoptronMount:
         return response == "1"
 
     def set_az(self, az):
+        az = self.offset_az(az)
+        sign = '+' if az >= 0 else '-'
         az_str = f"{int(abs(az) * 360000):09d}#"  # Convert Az to 0.01 arc-seconds
-        command = f":Sz{az_str}"
-        # self.print_received(command, '')
-        return self.scope.send(command)
+        command = f":SZ{az_str}"
+        self.scope.send(command)
+        response = self.scope.recv()
+        self.print_received(command, response)
+        return 
 
     def slew_to_alt_az(self, alt, az):
         """ slew to a specific altitude and azimuth. """
         print('Setting the altitude and azimuth...')
-        self.set_alt(alt)
-        # print('Failed to set the altitude.')
         self.set_az(az)
+        self.set_alt(alt)
 
         print('Slewing to the altitude and azimuth...')
         self.slew_to_defined_position()
@@ -105,58 +108,90 @@ class IoptronMount:
         self.last_slew = time.time()
         return response == "1"
     
-    def slew_right(self, moving_time=2):
-        """Slew the mount to the right for a given time."""
-        print(f"Slewing right for {moving_time} seconds...")
-        self.slew_arrow_forever('right')
-        time.sleep(moving_time)
-        self.stop()
-    
-    def slew_left(self, moving_time=2):
-        """Slew the mount to the left for a given time."""
-        print(f"Slewing left for {moving_time} seconds...")
-        self.slew_arrow_forever('left')
-        time.sleep(moving_time)
-        self.stop()
+    def slew_with_speed(self, pos, name='alt', speed=9, tol=5, niters=100):
+        """Slew to the given position with the given speed."""
+        self.set_arrow_speed(speed)
 
-    def slew_up(self, moving_time=2):
-        """Slew the mount to the up for a given time."""
-        print(f"Slewing up for {moving_time} seconds...")
-        self.slew_arrow_forever('up')
-        time.sleep(moving_time)
-        self.stop()
-    
-    def slew_down(self, moving_time=2):
-        """Slew the mount to the down for a given time."""
-        print(f"Slewing down for {moving_time} seconds...")
-        self.slew_arrow_forever('down')
-        time.sleep(moving_time)
-        self.stop()
-
-    def slew_arrow(self, direction, duration):
-        """
-        Slews the mount in the specified direction for the given duration in milliseconds.
-        direction: str - Direction to slew the mount ('up', 'right', 'down', 'left').
-        duration: int - Duration in seconds (range [0, 99.999]).
-
-        NOT WORKING YET
-        """
-        if duration < 0 or duration > 99.999:
-            raise ValueError("Duration must be between 0 and 99999 milliseconds")
-
+        SIDREAL_RATE = 15.041 / 3600  # deg/sec
+        vel_book = {2:2, 3:8, 4:16, 5:64, 6:128, 7:256, 8:512, 9:900}
+        vel = vel_book[speed] * SIDREAL_RATE / 1.25 # deg/sec
+        
         if self.system_status.is_parked:
             print("Mount is parked. Unparking...")
             self.unpark()
+        
 
-        directions = {'up': "Mn", 'right': 'Me', 'down': 'Ms', 'left': 'Mw'}
-        if direction not in directions:
-            raise ValueError("Invalid direction. Use 'up', 'down', 'right', or 'left'")
+        diff = 180
+        count = 0
+        # NEEDS DEBUGGING
+        if name == 'alt':
+            while abs(diff) > tol:
+                self.get_current_alt_az()
+                alt = self.altitude_deg
+                diff = alt-pos
+                print(f"The position difference is: {diff:0.5f} deg")
+                if diff > 0:
+                    # print("Slewing down...")
+                    self.slew_down(abs(diff)/vel)
+                else:
+                    # print("Slewing up...")
+                    self.slew_up(abs(diff)/vel)
+                # time.sleep(1)
+                count+=1
+                if count > niters:
+                    print("The mount achieved the maximum number of iterations.")
+                    break
+        
+        # WORKING WELL
+        elif name == 'az':
+            while abs(diff) > tol:
+                self.get_current_alt_az()
+                az = self.azimuth_deg
+                diff = utils.angular_difference(az, pos)
+                print(f"The position difference is: {diff:0.5f} deg")
+                if diff > 0:
+                    print("Slewing right...")
+                    self.slew_right(abs(diff)/vel)
+                else:
+                    print("Slewing left...")
+                    self.slew_left(abs(diff)/vel)
+                # time.sleep(1)
+                count+=1
+                if count > niters:
+                    print("The mount achieved the maximum number of iterations.")
+                    break
 
-        duration_ms = duration*1000
-        command_prefix = directions[direction]
-        command = f":{command_prefix}{duration_ms:05d}#"
-        print(f"Sending command: {command}")
-        self.scope.send(command)
+    def slew_right(self, moving_time=2, is_freerun=False):
+        """Slew the mount to the right for a given time."""
+        print(f"Slewing right for {moving_time} seconds...")
+        self.slew_arrow_forever('right')
+        if not is_freerun:
+            time.sleep(moving_time)
+            self.stop()
+    
+    def slew_left(self, moving_time=2, is_freerun=False):
+        """Slew the mount to the left for a given time."""
+        print(f"Slewing left for {moving_time} seconds...")
+        self.slew_arrow_forever('left')
+        if not is_freerun:
+            time.sleep(moving_time)
+            self.stop()
+
+    def slew_up(self, moving_time=2, is_freerun=False):
+        """Slew the mount to the up for a given time."""
+        print(f"Slewing up for {moving_time} seconds...")
+        self.slew_arrow_forever('up')
+        if not is_freerun:
+            time.sleep(moving_time)
+            self.stop()
+    
+    def slew_down(self, moving_time=2, is_freerun=True):
+        """Slew the mount to the down for a given time."""
+        print(f"Slewing down for {moving_time} seconds...")
+        self.slew_arrow_forever('down')
+        if not is_freerun:
+            time.sleep(moving_time)
+            self.stop()
 
     def slew_arrow_forever(self, direction: str):
         """method to move the mount in the supplied cardinal direction.
@@ -173,9 +208,9 @@ class IoptronMount:
         assert direction.lower() in directions
         move_command = ":" + directions[direction.lower()] + "#"
         self.scope.send(move_command)
-        if self.scope.recv() == '1':
-            return True
-        return False
+        # if self.scope.recv() == '1':
+        #     return True
+        # return False
     
     def set_arrow_speed(self, speed: int):
         """Slew the mount in the specified direction at the given speed. The speed
@@ -197,6 +232,13 @@ class IoptronMount:
         self.scope.send(command)
         return self.scope.recv() == '1'
     
+    def goto_zero_position(self):
+        """Go to the zero position (home position)."""
+        command = ":MH#"
+        response = self.scope.send(command)
+        self.print_received(command, response)
+        return response == "1"
+    
     def park(self):
         """Park the mount at the most recently defined parking position."""
         self.scope.send(":MP1#")
@@ -211,6 +253,21 @@ class IoptronMount:
         self.print_received(command, response)
         self.system_status.is_parked = response == "1"
         return response == "1"
+
+    def get_park_position(self):
+        """Get the current parking position of the mount. """
+        self.scope.send(':GPC#')
+        returned_data = self.scope.recv()
+        alt, az = utils.parse_alt_az("+"+returned_data)
+        self.altitude_park = self.offset_alt(alt)
+        self.azimuth_park = self.offset_az(az)
+        print("Park position:")
+        print(f'Altitude: {self.altitude_park:0.5f} deg, Azimuth: {self.azimuth_park:0.5f} deg')
+    
+    def print_park_position(self):
+        """Print the current parking position of the mount. """
+        self.get_park_position()
+        print(f'Altitude: {self.altitude} deg, Azimuth: {self.azimuth} deg')
     
     def set_hemisphere(self, direction: str):
         """Set the mount's hemisphere. Supplied argument must be 'north', 'south', or
@@ -222,27 +279,21 @@ class IoptronMount:
         self.scope.recv()
         return True
     
-    def start_tracking(self):
-        """Commands the mount to start tracking. Returns True when command is sent and
-        received, otherwise returns False."""
-        tracking_command = ":ST1#"
-        self.scope.send(tracking_command)
-        if self.scope.recv() == '1':
-            return True
-        return False
-    
-    def stop_tracking(self):
-        """Commands the mount to stop tracking. Returns True when command is sent and
-        received, otherwise returns False."""
-        tracking_command = ":ST0#"
-        self.scope.send(tracking_command)
-        if self.scope.recv() == '1':
-            return True
-        return False
-    
     def stop(self):
         """Stop all slewing no matter the source of slewing or the direction(s)."""
         self.scope.send(':Q#')
+
+    def stop_updown(self):
+        """Stop the mount from moving up or down."""
+        self.scope.send(':qD#')
+        response = self.scope.recv()
+        return response == "1"
+    
+    def stop_leftright(self):
+        """Stop the mount from moving left or right."""
+        self.scope.send(':qR#')
+        response = self.scope.recv()
+        return response == "1"
 
     def print_received(self, command, response):
         print(f"Command {command} accepted {bool(response)}")
@@ -252,20 +303,78 @@ class IoptronMount:
         self.scope.send(":GAC#")
         response = self.scope.recv()
         # print(f"Raw response: {response}")  # Print the raw response
-        self.altitude_deg, self.azimuth_deg = utils.parse_alt_az(response)
-        print("Alt, Az [deg]: ", self.altitude_deg, self.azimuth_deg)
-    
+        pos = utils.parse_alt_az(response)
+        self.altitude_deg = self.offset_alt(pos[0]) 
+        self.azimuth_deg =self.offset_az(pos[1])
+        print(f"Alt, Az [deg]: {self.altitude_deg:0.5f}, {self.azimuth_deg:0.5f}")
+
+    def get_current_ra_dec(self):
+        """Get the current RA and DEC from the mount."""
+        self.scope.send(":GEP#")
+        response = self.scope.recv()
+        # print(f"Raw response: {response}")  # Print the raw response
+        pos = utils.parse_alt_az(response)
+        self.dec_deg = self.offset_alt(pos[0]) 
+        self.ra_deg =self.offset_az(pos[1])
+        print(f"Ra, Dec [deg]: {self.ra_deg:0.5f}, {self.dec_deg:0.5f}")
+
     def get_mount_version(self):
         """Get the mount version."""
         self.scope.send(':MountInfo#')
         response = self.scope.recv()
         print(f"Mount version: {response}")
         return response
+    
+    # def switch_to_altaz_mode(self, north_pole=90):
+    #     """Switch the mount to AltAz mode. 
+        
+    #     The latitude is se to 90deg (i.e. the North Pole) by default.
+    #     """
+    #     latitude_str = f"{int( (north_pole-90) * 360000):08d}"
+    #     longitude_str = f"{int((118.79722) * 360000):08d}"
+    #     self.scope.send(f":SLA+{latitude_str}#")
+    #     response = self.scope.recv()
+    #     self.print_received(f":SLA+{latitude_str}#", response)
 
+    #     # set longitude
+    #     self.scope.send(f":SLO+{longitude_str}#")
+    #     response = self.scope.recv()
+    #     self.print_received(f":SLO+{longitude_str}#", response)
+    #     return response == "1"
+    
+    def set_lat_long(self, lat, long):
+        """Set the latitude and longitude of the mount.
+        
+        Args:
+            lat (float): latitude in degrees (range: -90 to 90)
+            long (float): longitude in degrees (range: -180 to 180)
+
+        """
+        sign = '+' if lat >= 0 else '-'
+        latitude_str = f"{sign}{int( abs(lat) * 360000):08d}"
+
+        sign = '+' if long >= 0 else '-'
+        longitude_str = f"{sign}{int( abs(long) * 360000):08d}"
+        self.scope.send(f":SLA{latitude_str}#")
+        response = self.scope.recv()
+        self.print_received(f":SLA{latitude_str}#", response)
+
+        # set longitude
+        self.scope.send(f":SLO{longitude_str}#")
+        response = self.scope.recv()
+        self.print_received(f":SLO{longitude_str}#", response)
+        return response == "1"
+    
+    def set_zero_position(self):
+        """This command will set current position as zero position."""
+        self.scope.send(":SZP#")
+        response = self.scope.recv()
+        return response == "1"
+    
     def set_park_position(self, alt=90, az=0):
         """Set the parking position of the mount."""
-        alt_str = f"{int(alt * 360000):08d}"
-        az_str = f"{int(az * 360000):08d}"
+        alt_str = f"{int(self.offset_alt(alt) * 360000):08d}"
+        az_str = f"{int(self.offset_az(az) * 360000):08d}"
 
         # set azimuth
         self.scope.send(f":SPA+{az_str}#")
@@ -284,6 +393,24 @@ class IoptronMount:
         j2k_time = str(utils.get_utc_time_in_j2k()).zfill(13)
         time_command = ":SUT" + j2k_time + "#"
         self.scope.send(time_command)
+
+    def set_max_speed(self):
+        """Set the mount to the maximum speed."""
+        self.set_arrow_speed(9)
+        # self.scope.send(":MSR#")
+        # response = self.scope.recv()
+        # return response == "1"
+
+    def set_current_time(self):
+        """Set the current UTC time on the mount."""
+        current_time = Time.now()
+        
+        # Convert current UTC time to JD since J2000
+        jd_value = current_time.jd
+        jd_j2000 = jd_value - 2451545.0  # J2000 is 2451545.0
+        utc_millis = int(jd_j2000 * 8.64e7)  # Convert to milliseconds
+        # Send the time to the mount
+        self.scope.send(f":SUT{utc_millis:013d}#")
 
     def set_timezone_offset(self, offset = utils.get_utc_offset_min()):
         """Sets the time zone offset on the mount to the computer's TZ offset."""
@@ -326,28 +453,44 @@ class IoptronMount:
         self.scope.send(':GLS#')
         response = self.scope.recv()
         return len(response) > 0
+    
+    def _continous_altaz_reading(self,i):
+        """Continously read the altitude and azimuth."""
+        self.scope.send(":GAC#")
+        response, timestamp = self.scope.recv_timestamp()
+        pos = utils.parse_alt_az(response)
+        self.altaz['alt'][i] = self.offset_alt(pos[0])
+        self.altaz['az'][i] = self.offset_az(pos[1])
+        self.altaz['time'][i] = timestamp
 
-    def get_system_state(self, verbose=True):
-        """Get (a lot) of status from the mount. Get movement
-        and tracking information."""
-        self.scope.send(":GLS#")
-        response_data = self.scope.recv()
-        status_code = response_data[18:19]
-        self.system_status.update_status(status_code)
-        if verbose:
-            print(self.system_status)
-        self.last_update = time.time()
+    def continous_altaz_reading(self, timeout, interval=0.1, verbose=True):
+        """Continously read the altitude and azimuth."""
+        nsamples = int(timeout / interval)
 
-    def set_current_time(self):
-        """Set the current UTC time on the mount."""
-        current_time = Time.now()
-        
-        # Convert current UTC time to JD since J2000
-        jd_value = current_time.jd
-        jd_j2000 = jd_value - 2451545.0  # J2000 is 2451545.0
-        utc_millis = int(jd_j2000 * 8.64e7)  # Convert to milliseconds
-        # Send the time to the mount
-        self.scope.send(f":SUT{utc_millis:013d}#")
+        alt_vec = np.zeros(nsamples)
+        az_vec = np.zeros(nsamples)
+        t_vec = np.full(nsamples, np.datetime64('1970-01-01T00:00:00', 'ns'), dtype='datetime64[ns]')
+        self.altaz = {'alt': alt_vec, 'az':az_vec, 'time':t_vec}
+        for i in range(nsamples):
+            self._continous_altaz_reading(i)
+            if verbose:
+                alt, az = self.altaz['alt'][i], self.altaz['az'][i]
+                print(f"Altitude: {alt:0.5f}, Azimuth: {az:0.5f}")
+            time.sleep(interval)
+    
+    def offset_alt(self, alt):
+        return (alt - self.OFFSET_ALT) #% 90
+    
+    def offset_az(self, az):
+        return (az - self.OFFSET_AZ) % 360
+    
+    def is_slewing(self):
+        """Check if the mount is slewing."""
+        time.sleep(1)
+        self.get_system_state(verbose=False)
+        return self.system_status.is_sleewing
+    
+    
 
 @dataclass
 class SystemStatus:

@@ -432,10 +432,10 @@ class Keysight():
 if __name__=='__main__':
     k = Keysight()
     # print each parameter and its explanation
-    k.explain_params()
+    # k.explain_params()
 
     # find the instrument
-    # k.find_instrument()
+    k.find_instrument()
     
     # get the power status
     k.get_power()
