@@ -24,8 +24,9 @@ def parse_alt_az(response, is_latlong=False):
         alt (float): the altitude in degree
         az (float): the azimuth in degree
     """
-    if len(response) == 20:
-        response = response[1:]
+    if len(response) > 19:
+        comp = int(len(response) - 19)
+        response = response[comp:]
 
     # Extract altitude and azimuth parts
     sign = response[0]

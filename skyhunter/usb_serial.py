@@ -13,7 +13,7 @@ import serial.tools.list_ports
 class USBSerial:
     """Class for communicating with devices over serial."""
     def __init__(self, port = 'COM5', baud = 115200, log_level = logging.INFO):
-        self.send_wait = 0.20 # Arbritrary waiting period to save flooding comms
+        self.send_wait = 0.1 # Arbritrary waiting period to save flooding comms
         logging.basicConfig(filename='iotty.log', format='%(asctime)s - %(message)s',\
             level=log_level)
             

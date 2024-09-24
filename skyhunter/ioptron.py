@@ -5,6 +5,10 @@ from dataclasses import dataclass, field
 from astropy.time import Time, TimeDelta
 import astropy.units as u
 
+import asyncio
+import datetime
+
+
 from .usb_serial import USBSerial
 from . import utils
 
@@ -24,6 +28,8 @@ class IoptronMount:
 
         self.OFFSET_ALT = 0
         self.OFFSET_AZ = 0
+        self.slew_setlle_time = 0.4 # 400 ms threshold for the movement to settle
+        self.slew_pause = 0.2 # 400 ms to stop
 
         # Time information
         self.time = TimeInfo()
@@ -108,90 +114,116 @@ class IoptronMount:
         self.last_slew = time.time()
         return response == "1"
     
+    def goto_elevation(self, el, speed=9, tol=5, niters=5):
+        # self.get_current_alt_az()
+        self.slew_with_speed(el, 'alt', speed, tol, niters)
+
+    def goto_azimuth(self, az, speed=9, tol=5, niters=5):
+        # self.get_current_alt_az()
+        self.slew_with_speed(az, 'az', speed, tol, niters)
+
     def slew_with_speed(self, pos, name='alt', speed=9, tol=5, niters=100):
         """Slew to the given position with the given speed."""
         self.set_arrow_speed(speed)
-
-        SIDREAL_RATE = 15.041 / 3600  # deg/sec
-        vel_book = {2:2, 3:8, 4:16, 5:64, 6:128, 7:256, 8:512, 9:900}
-        vel = vel_book[speed] * SIDREAL_RATE / 1.25 # deg/sec
         
         if self.system_status.is_parked:
             print("Mount is parked. Unparking...")
             self.unpark()
         
+        self.get_current_alt_az()
+        diffDict = {'alt': elevation_difference(pos, self.altitude_deg % 90), 'az': azimuth_difference(pos,self.azimuth_deg)}
+        diff = diffDict[name]
 
-        diff = 180
         count = 0
-        # NEEDS DEBUGGING
+        # Working well
         if name == 'alt':
             while abs(diff) > tol:
+                print(10*"-------")
                 self.get_current_alt_az()
                 alt = self.altitude_deg
-                diff = alt-pos
-                print(f"The position difference is: {diff:0.5f} deg")
-                if diff > 0:
-                    # print("Slewing down...")
-                    self.slew_down(abs(diff)/vel)
-                else:
-                    # print("Slewing up...")
-                    self.slew_up(abs(diff)/vel)
-                # time.sleep(1)
+                diff = elevation_difference(pos, alt)
+                slew_time = get_slew_time(speed, diff)
+                print(f"The alt difference is: {diff:0.5f} deg")
+
+                if abs(diff) > tol:
+                    if slew_time<self.slew_setlle_time:
+                        print("Refining movement, reducing the speed")
+                        slew_time, reduced_speed = refine_movement(diff, self.slew_setlle_time)
+                        self.set_arrow_speed(reduced_speed)
+
+                    if diff > 0:
+                        self.slew_up(slew_time)
+                    elif diff<0:
+                        self.slew_down(slew_time)
+
                 count+=1
                 if count > niters:
                     print("The mount achieved the maximum number of iterations.")
+                    self.stop_updown()
                     break
-        
+
         # WORKING WELL
         elif name == 'az':
             while abs(diff) > tol:
+                print(10*"-------")
                 self.get_current_alt_az()
                 az = self.azimuth_deg
-                diff = utils.angular_difference(az, pos)
+                diff = azimuth_difference(pos, az)
+                slew_time = get_slew_time(speed, diff)
                 print(f"The position difference is: {diff:0.5f} deg")
-                if diff > 0:
-                    print("Slewing right...")
-                    self.slew_right(abs(diff)/vel)
-                else:
-                    print("Slewing left...")
-                    self.slew_left(abs(diff)/vel)
-                # time.sleep(1)
+
+                if abs(diff) > tol:
+                    if slew_time<self.slew_setlle_time:
+                        print("Refining movement, reducing the speed")
+                        slew_time, reduced_speed = refine_movement(diff, self.slew_setlle_time)
+                        self.set_arrow_speed(reduced_speed)
+
+                    if diff > 0:
+                        self.slew_right(slew_time)
+                    else:
+                        self.slew_left(slew_time)
+
                 count+=1
                 if count > niters:
                     print("The mount achieved the maximum number of iterations.")
+                    self.stop_leftright()
                     break
 
     def slew_right(self, moving_time=2, is_freerun=False):
         """Slew the mount to the right for a given time."""
-        print(f"Slewing right for {moving_time} seconds...")
+        print(f"Slewing right for {moving_time:0.5f} seconds...")
         self.slew_arrow_forever('right')
         if not is_freerun:
-            time.sleep(moving_time)
-            self.stop()
+            time.sleep(moving_time-self.slew_pause)
+            self.stop_leftright()
+            # time.sleep(self.slew_pause)
     
     def slew_left(self, moving_time=2, is_freerun=False):
         """Slew the mount to the left for a given time."""
-        print(f"Slewing left for {moving_time} seconds...")
+        print(f"Slewing left for {moving_time:0.5f} seconds...")
         self.slew_arrow_forever('left')
         if not is_freerun:
-            time.sleep(moving_time)
-            self.stop()
+            time.sleep(moving_time-self.slew_pause)
+            self.stop_leftright()
+            # time.sleep(self.slew_pause)
 
     def slew_up(self, moving_time=2, is_freerun=False):
         """Slew the mount to the up for a given time."""
-        print(f"Slewing up for {moving_time} seconds...")
+        print(f"Slewing up for {moving_time:0.5f} seconds...")
         self.slew_arrow_forever('up')
         if not is_freerun:
-            time.sleep(moving_time)
-            self.stop()
-    
-    def slew_down(self, moving_time=2, is_freerun=True):
+            time.sleep(moving_time-self.slew_pause)
+            self.stop_updown()
+            # time.sleep(self.slew_pause)
+
+    def slew_down(self, moving_time=2, is_freerun=False):
         """Slew the mount to the down for a given time."""
-        print(f"Slewing down for {moving_time} seconds...")
+        print(f"Slewing down for {moving_time:0.5f} seconds...")
         self.slew_arrow_forever('down')
         if not is_freerun:
-            time.sleep(moving_time)
-            self.stop()
+            time.sleep(moving_time-self.slew_pause)
+            self.stop_updown()
+            # time.sleep(self.slew_pause)
 
     def slew_arrow_forever(self, direction: str):
         """method to move the mount in the supplied cardinal direction.
@@ -302,7 +334,10 @@ class IoptronMount:
         """Get the current altitude and azimuth from the mount."""
         self.scope.send(":GAC#")
         response = self.scope.recv()
-        # print(f"Raw response: {response}")  # Print the raw response
+        if len(response) < 10 or len(response) > 21:
+            self.get_current_alt_az()
+            return
+        
         pos = utils.parse_alt_az(response)
         self.altitude_deg = self.offset_alt(pos[0]) 
         self.azimuth_deg =self.offset_az(pos[1])
@@ -373,18 +408,32 @@ class IoptronMount:
     
     def set_park_position(self, alt=90, az=0):
         """Set the parking position of the mount."""
+        # alt_str = f"{int(self.offset_alt(alt) * 360000):08d}"
+        # az_str = f"{int(self.offset_az(az) * 360000):08d}"
+
+        # # set azimuth
+        # self.scope.send(f":SPA+{az_str}#")
+        # response = self.scope.recv()
+        # self.print_received(f":SPA+{az_str}#", response)
+
+        # # set altitude 
+        # self.scope.send(f":SPH+{alt_str}#")
+        # response = self.scope.recv()
+        # self.print_received(f":SPH+{alt_str}#", response)
+
+        # return response == "1"
         alt_str = f"{int(self.offset_alt(alt) * 360000):08d}"
         az_str = f"{int(self.offset_az(az) * 360000):08d}"
 
         # set azimuth
-        self.scope.send(f":SPA+{az_str}#")
+        self.scope.send(f":SPA#")
         response = self.scope.recv()
-        self.print_received(f":SPA+{az_str}#", response)
+        # self.print_received(f":SPA+{az_str}#", response)
 
         # set altitude 
-        self.scope.send(f":SPH+{alt_str}#")
+        self.scope.send(f":SPH#")
         response = self.scope.recv()
-        self.print_received(f":SPH+{alt_str}#", response)
+        # self.print_received(f":SPH+{alt_str}#", response)
 
         return response == "1"
     
@@ -463,34 +512,56 @@ class IoptronMount:
         self.altaz['az'][i] = self.offset_az(pos[1])
         self.altaz['time'][i] = timestamp
 
-    def continous_altaz_reading(self, timeout, interval=0.1, verbose=True):
-        """Continously read the altitude and azimuth."""
+    async def continous_altaz_reading(self, timeout, interval=0.1, verbose=True):
+        """Continuously read the altitude and azimuth asynchronously."""
         nsamples = int(timeout / interval)
 
+        # Initialize vectors
         alt_vec = np.zeros(nsamples)
         az_vec = np.zeros(nsamples)
         t_vec = np.full(nsamples, np.datetime64('1970-01-01T00:00:00', 'ns'), dtype='datetime64[ns]')
-        self.altaz = {'alt': alt_vec, 'az':az_vec, 'time':t_vec}
+        self.altaz = {'alt': alt_vec, 'az': az_vec, 'time': t_vec}
+
         for i in range(nsamples):
-            self._continous_altaz_reading(i)
+            # Perform the reading and update the vectors
+            alt, az = self._continous_altaz_reading(i)
+            self.altitude_deg = alt
+            self.azimuth_deg = az
+
             if verbose:
-                alt, az = self.altaz['alt'][i], self.altaz['az'][i]
-                print(f"Altitude: {alt:0.5f}, Azimuth: {az:0.5f}")
-            time.sleep(interval)
-    
+                print(f"Altitude: {alt:0.5f}, Azimuth: {az:0.5f}, Time: {self.altaz['time'][i]}")
+            await asyncio.sleep(interval)
+
+        print("Continous altaz reading is done.")
+        
     def offset_alt(self, alt):
         return (alt - self.OFFSET_ALT) #% 90
     
     def offset_az(self, az):
-        return (az - self.OFFSET_AZ) % 360
+        return (az - self.OFFSET_AZ) % 360 - 180
     
     def is_slewing(self):
         """Check if the mount is slewing."""
-        time.sleep(1)
+        # time.sleep(1)
         self.get_system_state(verbose=False)
         return self.system_status.is_sleewing
-    
-    
+
+def get_slew_time(speed, theta):
+    SIDREAL_RATE = 15.041 / 3600  # deg/sec
+    vel_book = {2:2, 3:8, 4:16, 5:64, 6:128, 7:256, 8:512, 9:900}
+    vel = vel_book[speed] * SIDREAL_RATE #/ 1.25 # deg/sec            
+    slew_time = abs(theta)/vel
+    return slew_time
+
+def refine_movement(theta, threshold):
+    speeds = np.arange(2,10,1,dtype=np.int64)
+    times = np.array([get_slew_time(s,abs(theta)) for s in speeds])
+    ix = np.where((times-threshold)>0)[0][-1]
+
+    # optimal parameter values
+    ts = times[ix]
+    speed = speeds[ix]
+    return ts, speed
 
 @dataclass
 class SystemStatus:
@@ -499,6 +570,7 @@ class SystemStatus:
     is_sleewing: bool = False
     is_tracking: bool = False
     is_parked: bool = False
+    is_home: bool = False
 
     status_actions =  {
             '0': {"description": "stopped at non-zero position", "is_sleewing": False, "is_tracking": False},
@@ -508,7 +580,7 @@ class SystemStatus:
             '4': {"description": "meridian flipping", "is_sleewing": True},
             '5': {"description": "tracking with periodic error correction enabled", "is_sleewing": False, "is_tracking": True, "pec_enabled": True},
             '6': {"description": "parked", "is_sleewing": False, "is_tracking": False, "is_parked": True},
-            '7': {"description": "stopped at zero position (home position)", "is_sleewing": False, "is_tracking": False},
+            '7': {"description": "stopped at zero position (home position)", "is_home": True, "is_sleewing": False, "is_tracking": False, "is_parked": False},
         }
     
     def __str__(self):
@@ -516,7 +588,8 @@ class SystemStatus:
                 f"  Description: {self.description}\n"
                 f"  Is Sleewing: {self.is_sleewing}\n"
                 f"  Is Tracking: {self.is_tracking}\n"
-                f"  Is Parked: {self.is_parked}\n")
+                f"  Is Parked: {self.is_parked}\n"
+                f"  Is Home: {self.is_home}\n")
         
     def update_status(self, status_code):
         action = self.status_actions.get(status_code, {})
@@ -525,6 +598,7 @@ class SystemStatus:
         self.is_sleewing = action.get("is_sleewing", False)
         self.is_tracking = action.get("is_tracking", False)
         self.is_parked = action.get("is_parked", False)
+        self.is_home = action.get("is_home", False)
 
 @dataclass
 class TimeInfo:
@@ -547,6 +621,27 @@ class TimeInfo:
             f"Local Time: {self.formatted}\n"
             '-------------------------------'
         )
+
+from astropy.coordinates import SkyCoord
+import astropy.units as u
+
+def elevation_difference(elevation1_deg, elevation2_deg):
+    coord1 = SkyCoord(alt=elevation1_deg * u.deg, az=0 * u.deg, frame='altaz')
+    coord2 = SkyCoord(alt=elevation2_deg * u.deg, az=0 * u.deg, frame='altaz')
+    # Calculate the signed angular difference
+    diff = coord1.alt - coord2.alt
+    return diff.to(u.deg).value
+
+def azimuth_difference(azimuth1_deg, azimuth2_deg):
+    # Create SkyCoord objects for the two azimuths, using a fixed altitude
+    coord1 = SkyCoord(alt=0 * u.deg, az=azimuth1_deg * u.deg, frame='altaz')
+    coord2 = SkyCoord(alt=0 * u.deg, az=azimuth2_deg * u.deg, frame='altaz')
+    
+    # Calculate the signed angular difference in azimuth
+    diff = coord1.az - coord2.az
+    diff = (diff + 180 * u.deg) % (360 * u.deg) - 180 * u.deg
+    # Normalize the difference to be within -180 to 180 degrees
+    return diff.to(u.deg).value
 
 if __name__ == "__main__":
     # Example usage:
