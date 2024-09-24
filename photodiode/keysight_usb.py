@@ -38,16 +38,39 @@ class Keysight():
         keysight_port (int): The port number for remote connections (if applicable).
 
     Methods:
-        sync_tracked_properties(): Synchronizes the instrument's settings with the expected parameters.
+        _config(): Configures the VISA resource manager and connects to the electrometer.
+        find_instrument(): Finds the instrument.
         on(): Turns the instrument input ON.
         off(): Turns the instrument input OFF.
         acquire(): Starts the data acquisition process.
         read_data(): Reads the acquired data in ASCII format.
         reset(): Resets the instrument's settings.
+        set_trigger_out(): Sets up the trigger output configuration.
+        set_mode(mode): Set the measurement mode of the electrometer.
+        set_rang(charge_range): Set the measurement range for the selected mode.
+        set_nplc(nplc): Set the number of power line cycles (NPLC) for measurement integration time.
+        set_nsamples(nsamples): Set the number of samples to be acquired during a measurement.
+        set_delay(delay): Set the delay time before starting the measurement.
+        set_interval(interval): Set the time interval between consecutive samples.
+        get_params(): Get the current state parameters by calling each get function and storing the output in a dictionary.
+        set_acquisition_time(time): Set the acquisition time for the measurement.
+        get_power(): Get the power reading from the instrument.
+        get_mode(): Get the current mode of the instrument.
+        get_aper(): Get the aperture setting of the instrument.
+        get_nplc(): Get the number of power line cycles (NPLC) setting.
+        get_rang(): Get the range setting of the instrument.
+        get_delay(): Get the delay setting of the instrument.
+        get_interval(): Get the interval setting between consecutive samples.
+        get_nsamples(): Get the number of samples setting.
+        get_powerline_freq(): Get the power line frequency setting.
+        get_default_params(): Get the current default configuration parameters.
+        explain_params(): Print an explanation of each parameter.
+        sync_tracked_properties(): Synchronizes the instrument's settings with the expected parameters.
+
     """
     # tracked_properties = ["mode", 'rang', 'nplc', 'nsamples', 'interval', 'delay']
 
-    def __init__(self, electrometer_id='USB0::10893::47105::MY61390152::0::INSTR'):
+    def __init__(self, electrometer_id='USB0::2391::54808::MY54321262::0::INSTR'):
         """
         Initializes the Keysight object with the specified resource identifiers.
 
@@ -57,10 +80,10 @@ class Keysight():
         self.config = Config()
         self.config.electrometer_id = electrometer_id
         self.default_params = {
-                        "mode": 'CURR',
-                        'rang': '2e-6',
+                        "mode": 'CHAR',
+                        'rang': 'AUTO',
                         'nplc': 0.1,
-                        'nsamples': 100,
+                        'nsamples': 10,
                         'delay': 0,
                         'interval': 2e-3,
                         # 'aper': 'AUTO',  # Uncomment if aperture is used
@@ -97,9 +120,9 @@ class Keysight():
         """
         Synchronizes the instrument's settings with the expected parameters.
         """
-        print('Setting defult parameters')
+        # print('Setting defult parameters')
         for p in self.tracked_properties:
-            print(f'Set {p} to {self.default_params[p]}')
+            # print(f'Set {p} to {self.default_params[p]}')
             getattr(self, f'set_{p}')(self.default_params[p])
     
     def query(self, command):
@@ -175,12 +198,22 @@ class Keysight():
 
     def acquire(self):
         """Starts the data acquisition process."""
-        t_acq = self.params['nsamples'] * self.params['interval']
+        # print("Get frequency")
+        freq = 50 # Hz # to be checked #self.get_powerline_freq()
+        # print("Get acquisition time")
+        self.t_acq = float(self.params['nsamples']) * (float(self.params['nplc'])*1/freq + float(self.params['interval']))/2
+        print('acquisition time:', self.t_acq)
+
         self.write(':INIT:ACQ')
 
-        for t in range(int(t_acq * 100) + 1):
-            print(f'Acquisition {t/100:.2f}/{t_acq:.2f} s', end='\r')
-            time.sleep(1e-2)
+        # Use time.time() to track real-time progress
+        start_time = time.time()
+        
+        # Wait for the acquisition to complete based on the calculated time
+        while time.time() - start_time < self.t_acq:
+            elapsed = time.time() - start_time
+            print(f'Acquisition {elapsed:.2f}/{self.t_acq:.2f} s', end='\r')
+            time.sleep(0.005)  # Sleep for 10 ms to avoid overwhelming the system
 
         print('\nAcquisition finished')
 
@@ -401,7 +434,16 @@ class Keysight():
             int: The number of samples.
         """
         return int(self.query(':TRIG:ACQ:COUN?'))
+    
+    def get_powerline_freq(self):
+        """
+        Get the power line frequency setting.
 
+        Returns:
+            float: The power line frequency.
+        """
+        return float(self.query(':SYST:POWE:FREQ?'))
+    
     def get_default_params(self):
         """
         Get the current default configuration parameters.
@@ -429,8 +471,28 @@ class Keysight():
             value = self.params.get(param)
             print(f"{param}: {value}\n    {explanation}\n")
 
+    def start_measurement(self):
+        """
+        Start electrometer measurements.
+
+        Returns:
+            dict: A dictionary containing the electrometer data.
+        """
+        print("Enter Start Measurment")
+        self.acquire()
+        # wait for acquisition completion
+        d = self.read_data()
+        self.datavector = d
+        # save the data
+        self.keysight_data = {}
+        self.keysight_data['mean'] = np.mean(d[self.params['mode']])
+        self.keysight_data['std'] = np.std(d[self.params['mode']])
+        self.keysight_data['teff'] = d['time'][-1]-d['time'][0]
+        return self.keysight_data
+    
 if __name__=='__main__':
     k = Keysight()
+    k.get_powerline_freq()
     # print each parameter and its explanation
     # k.explain_params()
 
