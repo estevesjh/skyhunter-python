@@ -91,6 +91,9 @@ class Keysight():
         self.tracked_properties = list(self.default_params.keys())
         self.params = self.default_params.copy()
         self.client = None
+        # self.rm = visa.ResourceManager()
+        self._config()
+        self.buffer = 0.010 # 25 ms
 
         # # check instrument connection
         # try:
@@ -99,14 +102,22 @@ class Keysight():
         #     print('Could not connect to the electrometer. Please check the instrument id.')
         #     self.find_instrument()
 
+    # def _config(self):
+    #     """Configures the VISA resource manager and connects to the electrometer."""
+    #     if self.client is not None:
+    #         # self.client.close()
+        
+    #     self.client = self.rm.open_resource(self.config.electrometer_id)
+    #     self.client.timeout = 100000
+
     def _config(self):
         """Configures the VISA resource manager and connects to the electrometer."""
-        if self.client is not None:
-            self.client.close()
+        # if self.client is not None:
+            # self.client.close()
         
         self.client = self.config.rm.open_resource(self.config.electrometer_id)
-        self.client.timeout = 100000  # Timeout in milliseconds (e.g., 5000 ms = 5 seconds)
-
+        self.client.timeout = 9000000  # Timeout in milliseconds (e.g., 5000 ms = 5 seconds)
+        # self.client.write('SYST:REM')
         # remote connections
         # self.client = telnetlib.Telnet(self.config.keysight_addr, self.config.keysight_port)
     
@@ -115,7 +126,10 @@ class Keysight():
         print("Available USB resources:")
         print(self.config.rm.list_resources())
         self.config.electrometer_id = input("Enter the resource identifier for the electrometer: ")
-
+        # self._config()
+        # make sure the system is remote
+        # self.write('SYST:REM')
+        
     def sync_tracked_properties(self):
         """
         Synchronizes the instrument's settings with the expected parameters.
@@ -127,7 +141,7 @@ class Keysight():
     
     def query(self, command):
         """Send a command to the instrument and return the response."""
-        self._config()
+        # self._config()
         try:
             response = self.client.query(command)
             return response.strip().strip('"') 
@@ -135,58 +149,58 @@ class Keysight():
             print(f"Query failed: {e}")
             return None
         finally:
-            self.client.close()
-            time.sleep(0.1)
+            # self.client.close()
+            time.sleep(self.buffer)
 
     def write(self, message):
         #self.client = telnetlib.Telnet(self.config.keysight_addr, self.config.keysight_port)
-        self._config()
+        # self._config()
         try:
             self.client.write(message)
         except EOFError:
-            self._config()
+            # self._config()
             self.client.write(message)
-        self.client.close()
-        time.sleep(0.1)
+        # self.client.close()
+        time.sleep(self.buffer)
     
     def read(self, message):
         self.client.write(message + '\r\n')
 
-        self._config()
+        # self._config()
         try:
             return self.client.read().strip()  # Use read() for string data
         except visa.VisaIOError as e:  # Handle errors specific to pyvisa
-            self._config()
+            # self._config()
             return self.client.read().strip()
         finally:
-            self.client.close()
-            time.sleep(0.1)
+            # self.client.close()
+            time.sleep(self.buffer)
     
     def read_binary_data(self, message):
-        self._config()
+        # self._config()
         self.client.write(message + '\r\n')
         try:
             return self.client.read_raw()  # Use read_raw() for binary data
         except visa.VisaIOError as e:  # Handle errors specific to pyvisa
-            self._config()
+            # self._config()
             return self.client.read_raw()
         finally:
-            self.client.close()
-            time.sleep(0.1)
+            # self.client.close()
+            time.sleep(self.buffer)
 
     # README: This function was designed to work with telnetlib
     # The function read_until() is not available in pyvisa
     # def read(self, message):
     #     # self.client = telnetlib.Telnet(self.config.keysight_addr, self.config.keysight_port)
-    #     self._config()
+    #     # self._config()
     #     self.client.write((message+'\r\n').encode())
     #     try:
     #         return self.client.read_until(b'\n', timeout=10)
     #     except EOFError:
-    #         self._config()
+    #         # self._config()
     #         return self.client.read_until(b'\n', timeout=10)
-    #     self.client.close()
-    #     time.sleep(0.1)
+    #     # self.client.close()
+    #     time.sleep(self.buffer)
         
     def on(self):
         """Turns the instrument input ON."""
@@ -196,26 +210,29 @@ class Keysight():
         """Turns the instrument input OFF."""
         self.write(':INP OFF')
 
-    def acquire(self):
+    def acquire(self, verbose=False):
         """Starts the data acquisition process."""
         # print("Get frequency")
         freq = 50 # Hz # to be checked #self.get_powerline_freq()
         # print("Get acquisition time")
-        self.t_acq = float(self.params['nsamples']) * (float(self.params['nplc'])*1/freq + float(self.params['interval']))/2
-        print('acquisition time:', self.t_acq)
+        self.t_acq = float(self.params['nsamples']) * (float(self.params['nplc'])*1/freq + float(self.params['interval']))
+        if verbose: print('acquisition time:', self.t_acq)
 
         self.write(':INIT:ACQ')
 
         # Use time.time() to track real-time progress
         start_time = time.time()
-        
+          
         # Wait for the acquisition to complete based on the calculated time
         while time.time() - start_time < self.t_acq:
             elapsed = time.time() - start_time
-            print(f'Acquisition {elapsed:.2f}/{self.t_acq:.2f} s', end='\r')
-            time.sleep(0.005)  # Sleep for 10 ms to avoid overwhelming the system
 
-        print('\nAcquisition finished')
+            if verbose:
+                print(f'Acquisition {elapsed:.2f}/{self.t_acq:.2f} s', end='\r')
+
+            time.sleep(self.buffer)  # Sleep for 100 ms to avoid overwhelming the system
+
+        if verbose: print('\nAcquisition finished')
 
     def read_binary_data(self):
         d = self.read_binary_data(f':FORM:DATA REAL,32')
@@ -231,8 +248,16 @@ class Keysight():
         Returns:
             np.recarray: A record array containing time and measurement data.
         """
-        print('Reading the data')
-        self._config()
+        # print('Reading the data')
+        # self._config()
+
+        # check if the acquisition is complete and wait if necessary
+        opc = int(self.query('*OPC?'))
+        # if opc == 1:  # Check if bit 0 (OPC) is set
+        #     # print('Acquisition complete')
+        #     pass
+
+        # read the data
         t = self.client.query_ascii_values(':FETC:ARR:TIME?')
         t = np.array(t, dtype=float)
         d = self.client.query_ascii_values(f':FETC:ARR:{self.params["mode"]}?')
@@ -341,27 +366,27 @@ class Keysight():
             'power': self.get_power(),
             "mode": self.get_mode(),
             'aper': self.get_aper(),
-            'nplc': self.get_nplc(),
+            'nplc': float(self.get_nplc()),
             'rang': self.get_rang(),
             'delay': self.get_delay(),
             'interval': self.get_interval(),
-            'nsamples': self.get_nsamples()
+            'nsamples': int(self.get_nsamples())
         }
         print('\nCurrent instrument parameters:')
         for param, value in self.params.items():
             print(f"{param}: {value}")
         print("")
 
-    def set_acquisition_time(self, time):
+    def set_acquisition_time(self, time, freq=50):
         """
         Set the acquisition time for the measurement.
         
         Args:
             time (float): Acquisition time in seconds.
         """
-        nsamples = int(time / self.params['interval'])
+        nsamples = int(time * freq / float(self.params['nplc']))
         self.set_nsamples(nsamples)
-        print(f"Acquisition time set to {time} s for interval {self.params['interval']} s")
+        print(f"Acquisition time set to {time:0.3f} sec with nsamples {self.params['nsamples']} and {self.params['nplc']}")
 
     def get_power(self):
         """
@@ -470,7 +495,27 @@ class Keysight():
         for param, explanation in explanations.items():
             value = self.params.get(param)
             print(f"{param}: {value}\n    {explanation}\n")
+    
+    def auto_scale(self, verbose=False, rang0=20e-6):
+        rang = rang0 # 20 microA
+        for i in range(9):
+            self.set_rang(rang)
+            self.start_measurement()
+            value = np.mean(self.datavector[self.params['mode']])
+            if verbose: print(f"Range: {rang:e}, Value: {value:.2e}")
 
+            if np.log10(np.abs(value))>15:
+                # print("")
+                # print(f"Optimal range is {rang*10:e}")
+                self.set_rang(rang*100)
+                break
+            else:
+                rang /= 10
+            
+            if rang < 1e-15:
+                print("Range is beyond the limit")
+                break
+    
     def start_measurement(self):
         """
         Start electrometer measurements.
@@ -478,10 +523,11 @@ class Keysight():
         Returns:
             dict: A dictionary containing the electrometer data.
         """
-        print("Enter Start Measurment")
+        # print("Enter Start Measurment")
         self.acquire()
         # wait for acquisition completion
         d = self.read_data()
+
         self.datavector = d
         # save the data
         self.keysight_data = {}

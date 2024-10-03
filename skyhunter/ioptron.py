@@ -16,12 +16,13 @@ from . import utils
 
 class IoptronMount:
     def __init__(self, port, baudrate=115200):
-        print("Welcome to the iOptron Mount controller.")
+        # print("Welcome to the iOptron Mount controller.")
         self.scope = USBSerial(port=port, baud=baudrate, log_level = 'DEBUG')
         self.scope.open()
 
         if self.check_connection():
-            print("Connection established.")
+            # print("Connection established.")
+            pass
         else:
             print("Connection failed.")
             sys.exit(1)
@@ -131,18 +132,19 @@ class IoptronMount:
             self.unpark()
         
         self.get_current_alt_az()
-        diffDict = {'alt': elevation_difference(pos, self.altitude_deg % 90), 'az': azimuth_difference(pos,self.azimuth_deg)}
+        diffDict = {'alt': elevation_difference(pos%90, self.altitude_deg), 'az': azimuth_difference(pos, self.azimuth_deg)}
         diff = diffDict[name]
 
         count = 0
         # Working well
         if name == 'alt':
             while abs(diff) > tol:
-                print(10*"-------")
-                self.get_current_alt_az()
+                # print(10*"-------")
+                self.get_current_alt_az(verbose=False)
                 alt = self.altitude_deg
                 diff = elevation_difference(pos, alt)
                 slew_time = get_slew_time(speed, diff)
+                if alt>80: slew_time *= 1.25
                 print(f"The alt difference is: {diff:0.5f} deg")
 
                 if abs(diff) > tol:
@@ -157,7 +159,7 @@ class IoptronMount:
                         self.slew_down(slew_time)
 
                 count+=1
-                if count > niters:
+                if count >= niters:
                     print("The mount achieved the maximum number of iterations.")
                     self.stop_updown()
                     break
@@ -184,7 +186,7 @@ class IoptronMount:
                         self.slew_left(slew_time)
 
                 count+=1
-                if count > niters:
+                if count >= niters:
                     print("The mount achieved the maximum number of iterations.")
                     self.stop_leftright()
                     break
@@ -209,9 +211,12 @@ class IoptronMount:
 
     def slew_up(self, moving_time=2, is_freerun=False):
         """Slew the mount to the up for a given time."""
-        print(f"Slewing up for {moving_time:0.5f} seconds...")
         self.slew_arrow_forever('up')
-        if not is_freerun:
+        if is_freerun:
+            print("Warning: Freerun mode is enabled.")
+            pass
+        else:
+            print(f"Slewing up for {moving_time:0.5f} seconds...")
             time.sleep(moving_time-self.slew_pause)
             self.stop_updown()
             # time.sleep(self.slew_pause)
@@ -330,7 +335,7 @@ class IoptronMount:
     def print_received(self, command, response):
         print(f"Command {command} accepted {bool(response)}")
 
-    def get_current_alt_az(self):
+    def get_current_alt_az(self, verbose=True):
         """Get the current altitude and azimuth from the mount."""
         self.scope.send(":GAC#")
         response = self.scope.recv()
@@ -341,7 +346,8 @@ class IoptronMount:
         pos = utils.parse_alt_az(response)
         self.altitude_deg = self.offset_alt(pos[0]) 
         self.azimuth_deg =self.offset_az(pos[1])
-        print(f"Alt, Az [deg]: {self.altitude_deg:0.5f}, {self.azimuth_deg:0.5f}")
+        if verbose:
+            print(f"Alt, Az [deg]: {self.altitude_deg:0.5f}, {self.azimuth_deg:0.5f}")
 
     def get_current_ra_dec(self):
         """Get the current RA and DEC from the mount."""
@@ -353,11 +359,12 @@ class IoptronMount:
         self.ra_deg =self.offset_az(pos[1])
         print(f"Ra, Dec [deg]: {self.ra_deg:0.5f}, {self.dec_deg:0.5f}")
 
-    def get_mount_version(self):
+    def get_mount_version(self, verbose=False):
         """Get the mount version."""
         self.scope.send(':MountInfo#')
         response = self.scope.recv()
-        print(f"Mount version: {response}")
+        if verbose:
+            print(f"Mount version: {response}")
         return response
     
     # def switch_to_altaz_mode(self, north_pole=90):

@@ -7,7 +7,7 @@ import time
 
 t0 = time.time()
 
-name = 'test_0001'
+name = 'at_dome_test_0001'
 slewTime = 2.5 # seconds
 slewSteps = 6 # steps
 

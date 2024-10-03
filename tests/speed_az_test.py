@@ -6,7 +6,7 @@ import numpy as np
 import time
 
 t0 = time.time()
-name = 'test_0001'
+name = 'at_dome_test_0001'
 slewTime = 3.0 # seconds
 slewSteps = 15 # steps
 # it goes up to 175 degrees with 14 steps of 3.4 seconds

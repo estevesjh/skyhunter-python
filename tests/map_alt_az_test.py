@@ -14,8 +14,9 @@ AZ_PRED = np.linspace(0, 180, AZ_STEPS)
 EL_STEPS = 6 # steps
 EL_SLEW_TIME = 2.5 # seconds
 
-run_test = False
-plot_curve = True
+run_test = True
+plot_curve = False
+testName ='at_dome_test_0001'
 
 # Initialize the mount (make sure the port is correct)
 mount = IoptronMount(port='/dev/ttyUSB0')
@@ -32,7 +33,7 @@ if run_test:
         print("Cycle:", i+1)
         print(6*"-------")
 
-        name = f'cycle_{(i+1):04d}'
+        name = f'{testName}_cycle_{(i+1):04d}'
     
         # Perform a basic slew test
         results = mount_test.slew_fixed_duration_test(EL_SLEW_TIME, EL_STEPS, direction='alt')
